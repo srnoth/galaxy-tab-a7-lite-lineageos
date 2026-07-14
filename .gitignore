@@ -1,0 +1,24 @@
+# Firmware blobs & partition images — never commit (huge, redistribution-restricted).
+# The playbook tells you where to download them.
+*.img
+*.img.lz4
+*.lz4
+*.tar
+*.tar.md5
+*.bin
+SAMFW.COM_*
+backup/
+
+# Signing keys — never commit
+*.jks
+*.keystore
+*.pk8
+*.pem
+
+# Build scratch
+*-unsigned.apk
+*-aligned.apk
+*.idsig
+
+# ...but DO ship the released Magisk modules
+!magisk/**/*.zip

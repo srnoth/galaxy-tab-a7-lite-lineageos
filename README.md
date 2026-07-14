@@ -52,11 +52,12 @@ same either way. You can also just do both roles yourself.
 | G2 | The tablet has a **battery**, so unplugging ≠ power off. | To fully power off from ANY state (fastboot, recovery, Android, hung): **hold Power + Vol-Up + Vol-Down ~10 s** until the screen is black. |
 | G3 | **Samsung's LK bootloader-fastboot is reboot-only.** `fastboot flash …` returns `remote: 'unknown command'`; `fastboot reboot download` → `unknown reboot target`. | You cannot flash from bootloader-fastboot. Real flashing is Odin (Download mode) or mtkclient (BROM). |
 | G4 | **Samsung stock recovery has NO fastbootd.** `adb reboot fastboot`, `fastboot reboot fastboot`, and BCB `boot-recovery`/`--fastboot` all silently **bounce to Android**. | The ONLY way to reach fastbootd (needed to flash the GSI into the dynamic `super` partition) is **through TWRP** → Reboot → Fastboot. |
-| G5 | **This bootloader IGNORES the standard BCB.** Writing `boot-recovery` to `misc` does nothing (confirmed twice). | Recovery entry is by **hardware combo only** (Power + Vol-Up), never by BCB or `adb reboot recovery`. |
+| G5 | **On stock Samsung firmware, recovery entry is combo-only** — `adb reboot recovery` and a BCB `boot-recovery` in `misc` just bounce to Android (confirmed twice during conversion). **This is a stock-firmware trait, NOT permanent.** | During the **conversion** (Phases 1–5, still on Samsung/mid-flash) reach recovery by **hardware combo** (Power + Vol-Up). **Once LineageOS is running it's fixed:** `adb reboot recovery` and power-menu → Restart → Recovery both reach TWRP — so all post-conversion work (§3 updates, re-flashing) needs **no button combo and no operator**. |
 | G6 | **A normal Android boot RESTORES stock recovery over TWRP.** | After writing TWRP, do **NOT** let it boot to Android. Go **straight to recovery via the combo** so TWRP survives. |
 | G7 | The `recovery` partition is **32 MB** but TWRP's image is ~37 MB. | mtkclient writes only the first 32 MB and guards the size — this is **fine**: the real boot content (kernel+ramdisk+dtb ≈ 31.4 MB) fits; the truncated tail is just zero-pad + an AVB footer (irrelevant, verity disabled). |
 | G8 | **Use the REGULAR `arm64_bvN` GSI, NOT `-vndklite`.** | The XAC A14 vendor is full-VNDK; a vndklite GSI mismatches linker namespaces and **bootloops** (black screen, no boot animation). Every GSI reported booting on this device is a regular build. |
 | G9 | After flashing the GSI, **Format Data again and reboot to system from TWRP** — do NOT `fastboot reboot` straight to system. | Skipping the post-flash Format Data leaves dirty/encrypted userdata vs the FBE-patched fstab → bootloop. |
+| G10 | **A vanilla GSI can't use a screen lock** unless boot & system agree on the SPL: set a PIN → reboot → rejected in a blank-screen loop. | Keymaster requires the **boot** image's `os_patch_level` to equal the **system** SPL. Stock XAC boot = `2025-05`; GSI system = `2026-xx` → mismatch. Fix = **SPL-match the boot in Phase 5** (flashed alongside the GSI, so the lockscreen works from first boot). Magisk-independent (seen on the stock boot too). |
 
 ---
 
@@ -74,7 +75,8 @@ same either way. You can also just do both roles yourself.
 ### Firmware & images (download to the workbench, e.g. `~/a7lite/`)
 1. **Full XAC firmware `T227UVLSCFYE2`** (5 files: BL / AP / CP / CSC / [USERDATA]) as `tar.md5` — via
    Frija, SamFW, or samfrew. Extract the AP `super`, `boot`, `recovery`, `vbmeta`, etc. as needed
-   (`tar` → `lz4 -d`). The whole `tar.md5` set can be fed to odin4 directly.
+   (`tar` → `lz4 -d`). The whole `tar.md5` set can be fed to odin4 directly. **Keep the extracted stock
+   `boot.img`** — Phase 5's lockscreen SPL-match patches it.
 2. **gta7lite TWRP v2.2** — `TWRP_v2.2_gta7lite.tar` (release notes: *"Fixed Fastbootd"*) and
    `fbe_disabler_gta7lite.zip`, from
    `https://github.com/gta7lite/teamwin_device_samsung_gta7lite/releases`.
@@ -84,6 +86,12 @@ same either way. You can also just do both roles yourself.
    (If Lineage ever misbehaves, the community's most-praised alt is crDroid `arm64_bgN`.)
    → **Want Google apps?** Grab `…-arm64_bgN-signed.img.gz` instead (regular, NOT vndklite) — see the
      "Optional — Google apps" section; do not plan to sideload a GApps zip afterward.
+4. **`magiskboot`** — standalone boot-image tool used to SPL-match the boot (Phase 5 / §3). It ships inside
+   the official Magisk APK (`github.com/topjohnwu/Magisk/releases`); extract the one binary (this is **not**
+   installing root):
+   ```bash
+   cd ~/a7lite/fw && unzip -o -j Magisk-v*.apk lib/x86_64/libmagiskboot.so && mv -f libmagiskboot.so magiskboot && chmod +x magiskboot
+   ```
 
 ### Toolchain on the workbench
 ```bash
@@ -186,31 +194,38 @@ Samsung LK-fastboot can't flash (G3) and stock recovery has no fastbootd (G4), s
    > If you instead reach stock recovery, a normal boot restored it (G6) — re-write TWRP (step 2) and
    > combo again *without* letting Android run in between.
 
-### Phase 5 — Flash the GSI (fastbootd via TWRP)
-All of this is driven over `adb`/`fastboot` from the workbench; the operator just watches.
+### Phase 5 — Flash the GSI + SPL-matched boot (fastbootd via TWRP)
+Driven over `adb`/`fastboot` from the workbench. **First, on the host, SPL-match the stock boot** so the
+lockscreen works from the first boot (G10) — read the GSI's SPL straight off the image and patch `boot.img`:
+```bash
+cd ~/a7lite/fw
+grep -a -o 'ro.build.version.security_patch=[0-9-]*' lineage-21.0-<date>-*-arm64_bvN.img   # -> e.g. ...=2026-06
+./magiskboot unpack -h boot.img
+sed -i 's/^os_patch_level=.*/os_patch_level=2026-06/' header      # ← the YEAR-MONTH from above
+./magiskboot repack boot.img                                     # -> new-boot.img
+```
+Then flash the GSI **and** the matched boot together:
 ```bash
 # In TWRP: disable File-Based Encryption, then format data
 adb push ~/a7lite/twrp/fbe_disabler_gta7lite.zip /tmp/fbe.zip
 adb shell twrp install /tmp/fbe.zip          # -> "Finished Disabling FBE"
 adb shell twrp format data                   # -> Done
 
-# Enter REAL fastbootd (userspace) — this is what stock recovery could never give us
-adb reboot fastboot
-# wait, then confirm:
+adb reboot fastboot                          # REAL fastbootd — stock recovery could never give us this
 fastboot getvar is-userspace                 # must print: is-userspace: yes
 
-# Flash the GSI into the logical `system` partition
 fastboot erase system
-fastboot delete-logical-partition product    # optional headroom; GSI (~2.55 GB) fits in the ~3.49 GB slot anyway
-fastboot flash system ~/a7lite/fw/lineage-21.0-<date>-arm64_bvN.img     # ⚠ REGULAR bvN, not vndklite (G8)
+fastboot delete-logical-partition product    # headroom; GSI (~2.55 GB) fits the ~3.49 GB slot anyway
+fastboot flash system ~/a7lite/fw/lineage-21.0-<date>-arm64_bvN.img   # ⚠ REGULAR bvN, not vndklite (G8)
+fastboot flash boot   ~/a7lite/fw/new-boot.img                       # SPL-matched boot (fastbootd refuses? BROM: mtk.py w boot new-boot.img)
 
-# CRITICAL finish (G9): go back to recovery, format data AGAIN, then boot system
-fastboot reboot recovery                     # back into TWRP
+# CRITICAL finish (G9): recovery, format data AGAIN, then boot
+fastboot reboot recovery
 adb shell twrp format data
 adb reboot                                   # normal boot -> GSI
 ```
-**First boot legitimately takes several minutes** (ART cache). The tell for success vs. the earlier
-bootloop: you get an actual **LineageOS boot animation**, not a black screen.
+**First boot takes several minutes** (ART cache); success = a real **LineageOS boot animation**, not a black
+screen. Because boot & system now share an SPL, you can set a lockscreen PIN normally.
 
 ### Phase 6 — First boot & LineageOS setup
 - In the setup wizard: **no SIM, and SKIP Wi-Fi** during setup (known first-boot bootloop-avoidance on
@@ -249,7 +264,40 @@ tuning is tracked separately on the HA side of the project.)
 
 ---
 
-## 3. Troubleshooting (all observed on real hardware)
+## 3. Updating to a newer LineageOS build (later)
+No OTAs on GSIs (that's why "update Lineage recovery" stays **off** — it would eat TWRP). An update =
+flash the new `system` + a re-SPL-matched `boot`, together in one fastbootd session. Just **pull the
+current boot from the device and bump its SPL**: this carries over whatever's on it (including Magisk, if
+you added it) and only realigns the patch level — the kernel is stock XAC and doesn't change across LOS
+builds.
+
+```bash
+# 1) From booted LOS, reboot to TWRP over adb (works on LOS — G5; no combo/operator needed), then pull the
+#    current boot and read the NEW build's SPL off its image:
+adb reboot recovery                                          # or power menu -> Restart -> Recovery; wait for TWRP
+adb shell dd if=/dev/block/by-name/boot of=/sdcard/boot-live.img && adb pull /sdcard/boot-live.img ~/a7lite/fw/
+cd ~/a7lite/fw
+grep -a -o 'ro.build.version.security_patch=[0-9-]*' lineage-21.0-<newdate>-*-arm64_bvN.img   # -> e.g. ...=2026-09
+
+# 2) Bump the pulled boot's SPL to that value:
+./magiskboot unpack -h boot-live.img
+sed -i 's/^os_patch_level=.*/os_patch_level=2026-09/' header      # ← new YEAR-MONTH
+./magiskboot repack boot-live.img                                # -> new-boot.img
+
+# 3) In fastbootd, flash both and reboot:
+adb reboot fastboot ; fastboot getvar is-userspace               # is-userspace: yes
+fastboot erase system
+fastboot flash system ~/a7lite/fw/lineage-21.0-<newdate>-*-arm64_bvN.img
+fastboot flash boot   ~/a7lite/fw/new-boot.img                   # (fastbootd refuses? BROM: mtk.py w boot new-boot.img)
+fastboot reboot recovery ; adb shell twrp wipe cache ; adb shell twrp wipe dalvik ; adb reboot
+```
+Because boot & system share the SPL, your existing PIN keeps working — no locked-out state. First boot is
+slow (ART rebuild). A same-variant update keeps data (wipe cache/dalvik as above); for a **variant/tree/
+major-version** change use `adb shell twrp format data` instead (and expect to reconfigure).
+
+---
+
+## 4. Troubleshooting (all observed on real hardware)
 
 - **mtkclient exits `"Please disconnect… reconnect"` without writing** → stale device on the bus (G1).
   Clear USB, re-arm, fresh BROM entry.
@@ -263,18 +311,23 @@ tuning is tracked separately on the HA side of the project.)
   two causes: **(a)** you flashed `-vndklite` instead of regular `arm64_bvN` (G8); **(b)** you skipped
   the post-flash Format Data / did `fastboot reboot` straight to system (G9). Fix both: re-flash the
   regular build and finish with `fastboot reboot recovery` → `twrp format data` → `adb reboot`.
+- **Set a PIN, reboot, it's rejected (blank screen, loops)** → boot/system **SPL mismatch** (G10), not a
+  typo. Re-SPL-match `boot` to `ro.build.version.security_patch` (Phase 5 / §3). If already locked out,
+  **Format Data** in TWRP first, then flash the SPL-matched boot. (Magisk-independent.)
 - **Read the actual crash cause** from TWRP after a bootloop: `adb pull /sys/fs/pstore/`
   (`console-ramoops-0`), or `adb shell cat /proc/last_kmsg`; grep for `fs_mgr`/`mount`/`avb`/linker
   namespace errors. (Note: a clean init-reboot may leave pstore empty — absence of a panic itself
   points at a mount/decrypt failure rather than a kernel crash.)
 
-## 4. Gate checklist (stop if any fails)
+## 5. Gate checklist (stop if any fails)
 - **A — Feasibility:** device current bootloader char ≤ target XAC char (C). Any real US build satisfies this.
 - **B — Backup:** complete mtkclient partition backup exists off-device before ANY write.
 - **C — Cross-flash:** Download mode shows XAC `T227UVLSCFYE2`; boots; setup offers English (Canada).
 - **D — Unlock:** `flash.locked=0`, `verifiedbootstate=orange`; verity disabled (vbmeta patched).
 - **E — TWRP:** `adb devices` shows `product:twrp_gta7lite`; TWRP → Reboot → Fastboot yields `is-userspace: yes`.
 - **F — GSI:** device boots to the LineageOS animation and reaches setup; touch + Wi-Fi work.
+- **G — Lockscreen (optional):** a PIN set in Settings survives a reboot. If it loops, boot `os_patch_level`
+  ≠ system SPL — redo the SPL-match (Phase 5 / §3).
 
 ---
 
@@ -284,3 +337,17 @@ TWRP, combo-to-recovery, regular-not-vndklite, format-data-last) diverge from th
 purpose — the generic guides assume Odin ride-in and don't cover this bootloader's BCB/fastbootd
 quirks. Primary external sources: the SM-T227U-tested XDA "Flash a GSI on the A7 Lite (with TWRP)"
 guide, the gta7lite TWRP repo, AndyYan's GSI builds, and the SM-T227U cross-flash unlock thread.
+
+The lockscreen boot-SPL match (Phase 5 / §3) was diagnosed and validated 2026-07-13 on **both** SM-T227U
+units: matching the boot image's `os_patch_level` to the GSI's system SPL restores PIN/password unlock
+across reboots. Also hardware-confirmed on this device that day: `fastboot flash boot` works in fastbootd,
+and `adb reboot recovery` reaches TWRP once LineageOS is running (G5) — so Phase 5's boot flash and all §3
+updates need no button combo or operator.
+
+> ⚠️ **Security note — `/data` is NOT encrypted.** `fbe_disabler` (Phase 5) removes File-Based Encryption
+> so the GSI will boot, which leaves userdata in **plaintext**: a lockscreen PIN gates the running UI but
+> does **not** protect data at rest — anyone who boots TWRP or images the flash can read everything. As of
+> 2026-07 the GSI/Treble communities have **no** working data-at-rest encryption on Samsung MediaTek GSIs
+> (the vendor TEE Keymaster can't drive FBE under a GSI — the same subsystem behind the SPL lockscreen
+> bug); disabling it is the universal workaround. Fine for a kiosk; for a daily-driver holding real
+> accounts, treat these as unencrypted and use an app-level vault (e.g. Cryptomator) for anything sensitive.

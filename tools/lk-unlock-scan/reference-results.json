@@ -1,0 +1,30 @@
+[
+  {
+    "file": "backup/rl_all/lk.bin",
+    "bytes": 2097152,
+    "sha256": "1ef9d449c2876f9d23cbac9d3cef5168ccf66e07934e13083ee48b7641728dd9",
+    "status": "BLOCKER_CONFIRMED",
+    "reference": "SM-T227U US T227USQSCEYE2",
+    "evidence": {
+      "us_constant_false_gate": ["0x2449c"],
+      "us_startup_policy_sync": ["0x3066"],
+      "us_wipe_then_relock": ["0x3234"]
+    },
+    "meaning": "Blocking paths established by static trace; generic seccfg unlock did not persist in our test.",
+    "safe_to_flash": "NOT_ASSESSED",
+    "context_strings_present": ["lock -> unlock", "unlock -> lock", "--reason=ChangeDeviceState", "SEC_UNLOCK"],
+    "image_markers": ["KNLUB08A012"]
+  },
+  {
+    "file": "firmware/inspection/lk-verified.img",
+    "bytes": 2097152,
+    "sha256": "1c093c2e3f016ab587f78503c19cb8591691e227095f90907486b6c2eaca0f66",
+    "status": "REFERENCE_UNLOCK_TESTED",
+    "reference": "SM-T227U XAC T227UVLSCFYE2",
+    "evidence": {"xac_conditional_gate": ["0x242ec"]},
+    "meaning": "Known US blocker paths differ/are absent; LK replacement plus seccfg unlock succeeded on our SM-T227U. Not a universal safety claim.",
+    "safe_to_flash": "NOT_ASSESSED",
+    "context_strings_present": ["lock -> unlock", "unlock -> lock", "--reason=ChangeDeviceState", "SEC_UNLOCK"],
+    "image_markers": ["SRPUB08A012"]
+  }
+]

@@ -153,6 +153,52 @@ Store the backup **off-device**. Confirm `misc.bin`, `recovery.bin`, `vbmeta.bin
 3. Let it boot once. **Gate C:** confirm it's XAC — the default setup-wizard language offers
    **"English (Canada)"**, and Download mode shows the XAC version.
 
+### Fallback — Verizon/US Odin rejection: signed XAC LK only (BROM, one-device result)
+
+Use this fallback **only** when the full XAC flash is rejected before it starts writing, with Odin reporting
+`Re-Partition operation failed` and Download mode reporting **`Non-KNL image not allowed : param`**. Do
+**not** tick Re-Partition, supply a PIT, use NAND Erase, or retry the same full archive: on the observed
+Verizon unit, the rejection was for `param.bin.lz4` inside the XAC **BL** archive, not an Odin transport or
+download-integrity error.
+
+This route was tested once on an SM-T227U originally running Verizon US `T227USQSCEYE2` (BL C), after a
+complete BROM backup. It is **not** a clean-room reproduction or a claim that every US/carrier unit can skip
+the full XAC conversion. It retains the US preloader, partition table, modem, vendor, boot, and CSC; it writes
+only the original Samsung-signed XAC `lk-verified` image. Do not write `preloader`, `param`, `up_param`,
+`efuse`, the PIT/GPT, or any other member of the XAC BL archive through this fallback.
+
+1. Extract and verify the original, unmodified XAC LK. From the target XAC BL archive:
+   ```bash
+   tar -xOf BL_T227UVLSCFYE2_*.tar.md5 lk-verified.img.lz4 > lk-verified.img.lz4
+   lz4 -d lk-verified.img.lz4 lk-verified.img
+   sha256sum lk-verified.img
+   ```
+   The tested `T227UVLSCFYE2` LK is exactly 2,097,152 bytes and has SHA-256
+   `1c093c2e3f016ab587f78503c19cb8591691e227095f90907486b6c2eaca0f66`. Stop if either value differs.
+2. With a fresh BROM entry, read the current LK and confirm it matches the backup from Phase 1:
+   ```bash
+   cd ~/a7lite/mtkclient
+   ./.venv/bin/python mtk.py r lk ~/a7lite/backup/lk-before-xac-fallback.bin
+   cmp ~/a7lite/backup/lk-before-xac-fallback.bin ~/a7lite/backup/rl_all/lk.bin
+   ```
+3. With another fresh BROM entry, write **only** that verified LK:
+   ```bash
+   ./.venv/bin/python mtk.py w lk ~/a7lite/fw/lk-verified.img
+   ```
+4. Re-enter BROM, read LK back, and require a byte-for-byte match before continuing:
+   ```bash
+   ./.venv/bin/python mtk.py r lk ~/a7lite/backup/lk-after-xac-fallback.bin
+   cmp ~/a7lite/fw/lk-verified.img ~/a7lite/backup/lk-after-xac-fallback.bin
+   ```
+5. Run the Phase 3 unlock command below. A successful storage write alone is insufficient: after restart, the
+   tablet must display the unlocked-bootloader warning. On the observed unit, stock recovery then reported
+   corrupt data; that is expected before the subsequent clean install. If the warning does not appear or the
+   device behaves differently, stop. Do not continue to `vbmeta` or TWRP.
+
+**Fallback recovery:** the pre-write LK read in step 2 can be restored over BROM with
+`mtk.py w lk ~/a7lite/backup/lk-before-xac-fallback.bin`. This restores LK storage only; it does not undo
+`seccfg`, `vbmeta`, recovery, userdata, RPMB, or hardware fuses.
+
 ### Phase 3 — Unlock bootloader + disable verity (BROM) — **order is critical**
 BROM entry, then:
 ```bash
@@ -160,8 +206,10 @@ cd ~/a7lite/mtkclient
 # 1) UNLOCK first:
 ./.venv/bin/python mtk.py da seccfg unlock
 ```
-(Works on XAC FW; no-ops/fails on US FW. The OEM-unlock toggle never appears — this exploits below it.
-Next boot forces a factory reset — expected.) **Then, a fresh BROM entry**, and:
+(On the normal route, this works on XAC FW and no-ops/fails on US FW. On the fallback route, run it only
+after the LK readback match in the preceding section. The OEM-unlock toggle never appears — this exploits
+below it. Next boot forces a factory reset — expected.) **After the device-side unlocked warning is confirmed,
+use a fresh BROM entry**, then:
 ```bash
 # 2) DISABLE verity/verification — AFTER unlock, BEFORE first Android boot:
 ./.venv/bin/python mtk.py da vbmeta 3        # 3 = disable verity + verification
@@ -197,6 +245,11 @@ Samsung LK-fastboot can't flash (G3) and stock recovery has no fastbootd (G4), s
 ### Phase 5 — Flash the GSI + SPL-matched boot (fastbootd via TWRP)
 Driven over `adb`/`fastboot` from the workbench. **First, on the host, SPL-match the stock boot** so the
 lockscreen works from the first boot (G10) — read the GSI's SPL straight off the image and patch `boot.img`:
+
+For the normal full-XAC route, use the extracted XAC `boot.img`. For the LK-only fallback, use the original
+US `boot.bin` from the Phase 1 backup (copy it to the working directory as `boot.img`) — the one-device
+result retained the US boot and vendor, not XAC boot/vendor.
+
 ```bash
 cd ~/a7lite/fw
 grep -a -o 'ro.build.version.security_patch=[0-9-]*' lineage-21.0-<date>-*-arm64_bvN.img   # -> e.g. ...=2026-06
@@ -393,6 +446,11 @@ major-version** change use `adb shell twrp format data` instead (and expect to r
   has no fastbootd. Install TWRP first.
 - **Combo boots to stock recovery / setup wizard instead of TWRP** → a normal boot restored stock
   recovery (G6), or the two-stage combo mistimed. Re-write TWRP over BROM and combo straight in.
+- **Odin fails before writing with `Re-Partition operation failed`; Download mode says
+  `Non-KNL image not allowed : param`** → do not enable Re-Partition or supply a PIT. This is the observed
+  Verizon/US rejection of the XAC BL's `param` image, not a corrupt firmware download. If the prerequisite
+  model/build and complete BROM backup match the fallback section, use its signed-LK-only procedure; otherwise
+  stop and preserve the backup.
 - **GSI bootloops: black screen after the orange warning, no boot animation, reboots** → the classic
   two causes: **(a)** you flashed `-vndklite` instead of regular `arm64_bvN` (G8); **(b)** you skipped
   the post-flash Format Data / did `fastboot reboot` straight to system (G9). Fix both: re-flash the
@@ -408,7 +466,9 @@ major-version** change use `adb shell twrp format data` instead (and expect to r
 ## 5. Gate checklist (stop if any fails)
 - **A — Feasibility:** device current bootloader char ≤ target XAC char (C). Any real US build satisfies this.
 - **B — Backup:** complete mtkclient partition backup exists off-device before ANY write.
-- **C — Cross-flash:** Download mode shows XAC `T227UVLSCFYE2`; boots; setup offers English (Canada).
+- **C — Cross-flash:** normal route: Download mode shows XAC `T227UVLSCFYE2`; boots; setup offers English
+  (Canada). LK-only fallback: byte-for-byte LK readback matches the verified XAC image, then the device shows
+  the unlocked-bootloader warning after `seccfg unlock`; retained US vendor/CSC is expected.
 - **D — Unlock:** `flash.locked=0`, `verifiedbootstate=orange`; verity disabled (vbmeta patched).
 - **E — TWRP:** `adb devices` shows `product:twrp_gta7lite`; TWRP → Reboot → Fastboot yields `is-userspace: yes`.
 - **F — GSI:** device boots to the LineageOS animation and reaches setup; touch + Wi-Fi work.
